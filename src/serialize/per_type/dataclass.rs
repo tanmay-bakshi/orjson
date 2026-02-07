@@ -9,11 +9,41 @@ use crate::serialize::state::SerializerState;
 use crate::typeref::{
     DATACLASS_FIELDS_STR, DICT_STR, FIELD_TYPE, FIELD_TYPE_STR, SLOTS_STR, STR_TYPE,
 };
+#[cfg(not(Py_GIL_DISABLED))]
 use crate::util::isize_to_usize;
 
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
 use core::ptr::NonNull;
+
+#[cfg(Py_GIL_DISABLED)]
+struct DictItemsSnapshot {
+    items: Vec<(NonNull<crate::ffi::PyObject>, NonNull<crate::ffi::PyObject>)>,
+}
+
+#[cfg(Py_GIL_DISABLED)]
+impl DictItemsSnapshot {
+    #[inline]
+    fn new(dict: *mut crate::ffi::PyObject) -> Self {
+        unsafe {
+            Self {
+                items: crate::util::snapshot_pydict_items(dict),
+            }
+        }
+    }
+}
+
+#[cfg(Py_GIL_DISABLED)]
+impl Drop for DictItemsSnapshot {
+    fn drop(&mut self) {
+        for (key, value) in self.items.iter() {
+            unsafe {
+                ffi!(Py_DECREF(key.as_ptr()));
+                ffi!(Py_DECREF(value.as_ptr()));
+            }
+        }
+    }
+}
 
 #[repr(transparent)]
 pub(crate) struct DataclassGenericSerializer<'a> {
@@ -91,27 +121,51 @@ impl Serialize for DataclassFastSerializer {
     where
         S: Serializer,
     {
-        let len = isize_to_usize(ffi!(Py_SIZE(self.ptr)));
-        if len == 0 {
-            cold_path!();
-            return ZeroDictSerializer::new().serialize(serializer);
+        #[cfg(Py_GIL_DISABLED)]
+        {
+            let snapshot = DictItemsSnapshot::new(self.ptr);
+            if snapshot.items.len() == 0 {
+                cold_path!();
+                return ZeroDictSerializer::new().serialize(serializer);
+            }
+
+            let mut map = serializer.serialize_map(None).unwrap();
+            for (key, value) in snapshot.items.iter() {
+                let key_as_str = {
+                    let key_ob_type = ob_type!(key.as_ptr());
+                    if !is_class_by_type!(key_ob_type, STR_TYPE) {
+                        cold_path!();
+                        err!(SerializeError::KeyMustBeStr)
+                    }
+                    match unsafe { PyStrRef::from_ptr_unchecked(key.as_ptr()).as_str() } {
+                        Some(uni) => uni,
+                        None => err!(SerializeError::InvalidStr),
+                    }
+                };
+                if key_as_str.as_bytes()[0] == b'_' {
+                    cold_path!();
+                    continue;
+                }
+
+                let pyvalue = PyObjectSerializer::new(value.as_ptr(), self.state, self.default);
+                map.serialize_key(key_as_str).unwrap();
+                map.serialize_value(&pyvalue)?;
+            }
+            map.end()
         }
-        let mut map = serializer.serialize_map(None).unwrap();
 
-        let mut pos = 0;
-        let mut next_key: *mut crate::ffi::PyObject = core::ptr::null_mut();
-        let mut next_value: *mut crate::ffi::PyObject = core::ptr::null_mut();
+        #[cfg(not(Py_GIL_DISABLED))]
+        {
+            let len = isize_to_usize(ffi!(Py_SIZE(self.ptr)));
+            if len == 0 {
+                cold_path!();
+                return ZeroDictSerializer::new().serialize(serializer);
+            }
+            let mut map = serializer.serialize_map(None).unwrap();
 
-        pydict_next!(
-            self.ptr,
-            &raw mut pos,
-            &raw mut next_key,
-            &raw mut next_value
-        );
-
-        for _ in 0..len {
-            let key = next_key;
-            let value = next_value;
+            let mut pos = 0;
+            let mut next_key: *mut crate::ffi::PyObject = core::ptr::null_mut();
+            let mut next_value: *mut crate::ffi::PyObject = core::ptr::null_mut();
 
             pydict_next!(
                 self.ptr,
@@ -120,26 +174,38 @@ impl Serialize for DataclassFastSerializer {
                 &raw mut next_value
             );
 
-            let key_as_str = {
-                let key_ob_type = ob_type!(key);
-                if !is_class_by_type!(key_ob_type, STR_TYPE) {
+            for _ in 0..len {
+                let key = next_key;
+                let value = next_value;
+
+                pydict_next!(
+                    self.ptr,
+                    &raw mut pos,
+                    &raw mut next_key,
+                    &raw mut next_value
+                );
+
+                let key_as_str = {
+                    let key_ob_type = ob_type!(key);
+                    if !is_class_by_type!(key_ob_type, STR_TYPE) {
+                        cold_path!();
+                        err!(SerializeError::KeyMustBeStr)
+                    }
+                    match unsafe { PyStrRef::from_ptr_unchecked(key).as_str() } {
+                        Some(uni) => uni,
+                        None => err!(SerializeError::InvalidStr),
+                    }
+                };
+                if key_as_str.as_bytes()[0] == b'_' {
                     cold_path!();
-                    err!(SerializeError::KeyMustBeStr)
+                    continue;
                 }
-                match unsafe { PyStrRef::from_ptr_unchecked(key).as_str() } {
-                    Some(uni) => uni,
-                    None => err!(SerializeError::InvalidStr),
-                }
-            };
-            if key_as_str.as_bytes()[0] == b'_' {
-                cold_path!();
-                continue;
+                let pyvalue = PyObjectSerializer::new(value, self.state, self.default);
+                map.serialize_key(key_as_str).unwrap();
+                map.serialize_value(&pyvalue)?;
             }
-            let pyvalue = PyObjectSerializer::new(value, self.state, self.default);
-            map.serialize_key(key_as_str).unwrap();
-            map.serialize_value(&pyvalue)?;
+            map.end()
         }
-        map.end()
     }
 }
 
@@ -170,53 +236,102 @@ impl Serialize for DataclassFallbackSerializer {
     where
         S: Serializer,
     {
-        let fields = ffi!(PyObject_GetAttr(self.ptr, DATACLASS_FIELDS_STR));
-        debug_assert!(ffi!(Py_REFCNT(fields)) >= 2);
-        ffi!(Py_DECREF(fields));
-        let len = isize_to_usize(ffi!(Py_SIZE(fields)));
-        if len == 0 {
-            cold_path!();
-            return ZeroDictSerializer::new().serialize(serializer);
+        #[cfg(Py_GIL_DISABLED)]
+        {
+            let fields = ffi!(PyObject_GetAttr(self.ptr, DATACLASS_FIELDS_STR));
+            debug_assert!(ffi!(Py_REFCNT(fields)) >= 2);
+
+            let snapshot = DictItemsSnapshot::new(fields);
+            ffi!(Py_DECREF(fields));
+
+            if snapshot.items.len() == 0 {
+                cold_path!();
+                return ZeroDictSerializer::new().serialize(serializer);
+            }
+            let mut map = serializer.serialize_map(None).unwrap();
+
+            for (attr, field) in snapshot.items.iter() {
+                let field_type = ffi!(PyObject_GetAttr(field.as_ptr(), FIELD_TYPE_STR));
+                debug_assert!(ffi!(Py_REFCNT(field_type)) >= 2);
+                ffi!(Py_DECREF(field_type));
+                if unsafe {
+                    !core::ptr::eq(field_type.cast::<crate::ffi::PyTypeObject>(), FIELD_TYPE)
+                } {
+                    continue;
+                }
+
+                let key_as_str = match unsafe { PyStrRef::from_ptr_unchecked(attr.as_ptr()).as_str() } {
+                    Some(uni) => uni,
+                    None => err!(SerializeError::InvalidStr),
+                };
+                if key_as_str.as_bytes()[0] == b'_' {
+                    cold_path!();
+                    continue;
+                }
+
+                let value = ffi!(PyObject_GetAttr(self.ptr, attr.as_ptr()));
+                debug_assert!(ffi!(Py_REFCNT(value)) >= 2);
+                let pyvalue = PyObjectSerializer::new(value, self.state, self.default);
+
+                map.serialize_key(key_as_str).unwrap();
+                let res = map.serialize_value(&pyvalue);
+                ffi!(Py_DECREF(value));
+                res?;
+            }
+            map.end()
         }
-        let mut map = serializer.serialize_map(None).unwrap();
 
-        let mut pos = 0;
-        let mut next_key: *mut crate::ffi::PyObject = core::ptr::null_mut();
-        let mut next_value: *mut crate::ffi::PyObject = core::ptr::null_mut();
+        #[cfg(not(Py_GIL_DISABLED))]
+        {
+            let fields = ffi!(PyObject_GetAttr(self.ptr, DATACLASS_FIELDS_STR));
+            debug_assert!(ffi!(Py_REFCNT(fields)) >= 2);
+            ffi!(Py_DECREF(fields));
+            let len = isize_to_usize(ffi!(Py_SIZE(fields)));
+            if len == 0 {
+                cold_path!();
+                return ZeroDictSerializer::new().serialize(serializer);
+            }
+            let mut map = serializer.serialize_map(None).unwrap();
 
-        pydict_next!(fields, &raw mut pos, &raw mut next_key, &raw mut next_value);
-
-        for _ in 0..len {
-            let attr = next_key;
-            let field = next_value;
+            let mut pos = 0;
+            let mut next_key: *mut crate::ffi::PyObject = core::ptr::null_mut();
+            let mut next_value: *mut crate::ffi::PyObject = core::ptr::null_mut();
 
             pydict_next!(fields, &raw mut pos, &raw mut next_key, &raw mut next_value);
 
-            let field_type = ffi!(PyObject_GetAttr(field, FIELD_TYPE_STR));
-            debug_assert!(ffi!(Py_REFCNT(field_type)) >= 2);
-            ffi!(Py_DECREF(field_type));
-            if unsafe { !core::ptr::eq(field_type.cast::<crate::ffi::PyTypeObject>(), FIELD_TYPE) }
-            {
-                continue;
+            for _ in 0..len {
+                let attr = next_key;
+                let field = next_value;
+
+                pydict_next!(fields, &raw mut pos, &raw mut next_key, &raw mut next_value);
+
+                let field_type = ffi!(PyObject_GetAttr(field, FIELD_TYPE_STR));
+                debug_assert!(ffi!(Py_REFCNT(field_type)) >= 2);
+                ffi!(Py_DECREF(field_type));
+                if unsafe {
+                    !core::ptr::eq(field_type.cast::<crate::ffi::PyTypeObject>(), FIELD_TYPE)
+                } {
+                    continue;
+                }
+
+                let key_as_str = match unsafe { PyStrRef::from_ptr_unchecked(attr).as_str() } {
+                    Some(uni) => uni,
+                    None => err!(SerializeError::InvalidStr),
+                };
+                if key_as_str.as_bytes()[0] == b'_' {
+                    cold_path!();
+                    continue;
+                }
+
+                let value = ffi!(PyObject_GetAttr(self.ptr, attr));
+                debug_assert!(ffi!(Py_REFCNT(value)) >= 2);
+                ffi!(Py_DECREF(value));
+                let pyvalue = PyObjectSerializer::new(value, self.state, self.default);
+
+                map.serialize_key(key_as_str).unwrap();
+                map.serialize_value(&pyvalue)?;
             }
-
-            let key_as_str = match unsafe { PyStrRef::from_ptr_unchecked(attr).as_str() } {
-                Some(uni) => uni,
-                None => err!(SerializeError::InvalidStr),
-            };
-            if key_as_str.as_bytes()[0] == b'_' {
-                cold_path!();
-                continue;
-            }
-
-            let value = ffi!(PyObject_GetAttr(self.ptr, attr));
-            debug_assert!(ffi!(Py_REFCNT(value)) >= 2);
-            ffi!(Py_DECREF(value));
-            let pyvalue = PyObjectSerializer::new(value, self.state, self.default);
-
-            map.serialize_key(key_as_str).unwrap();
-            map.serialize_value(&pyvalue)?;
+            map.end()
         }
-        map.end()
     }
 }

@@ -186,6 +186,12 @@ pub(crate) unsafe extern "C" fn PyInit_orjson() -> *mut PyModuleDef {
     #[cfg(Py_3_13)]
     const PYMODULEDEF_LEN: usize = 4;
     unsafe {
+        #[cfg(Py_3_13)]
+        let gil_slot_value: *mut c_void = if cfg!(Py_GIL_DISABLED) {
+            crate::ffi::Py_MOD_GIL_NOT_USED
+        } else {
+            crate::ffi::Py_MOD_GIL_USED
+        };
         let mod_slots: Box<[PyModuleDef_Slot; PYMODULEDEF_LEN]> = Box::new([
             PyModuleDef_Slot {
                 slot: crate::ffi::Py_mod_exec,
@@ -200,7 +206,7 @@ pub(crate) unsafe extern "C" fn PyInit_orjson() -> *mut PyModuleDef {
             #[cfg(Py_3_13)]
             PyModuleDef_Slot {
                 slot: crate::ffi::Py_mod_gil,
-                value: crate::ffi::Py_MOD_GIL_USED,
+                value: gil_slot_value,
             },
             PyModuleDef_Slot {
                 slot: 0,

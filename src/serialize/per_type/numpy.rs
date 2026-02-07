@@ -2,7 +2,7 @@
 // Copyright ijl (2018-2026), Ben Sully (2021), Nazar Kostetskyi (2022), Aviram Hassan (2020-2021)
 
 use crate::ffi::{
-    Py_intptr_t, Py_ssize_t, PyListRef, PyObject, PyStrRef, PyTupleRef, PyTypeObject,
+    Py_intptr_t, PyListRef, PyObject, PyStrRef, PyTupleRef, PyTypeObject,
 };
 use crate::opt::Opt;
 use crate::serialize::buffer::SmallFixedBuffer;
@@ -101,8 +101,7 @@ pub(crate) fn is_numpy_array(ob_type: *mut PyTypeObject) -> bool {
 
 #[repr(C)]
 pub(crate) struct PyCapsule {
-    pub ob_refcnt: Py_ssize_t,
-    pub ob_type: *mut PyTypeObject,
+    pub ob_base: PyObject,
     pub pointer: *mut c_void,
     pub name: *const c_char,
     pub context: *mut c_void,
@@ -309,7 +308,6 @@ impl NumpyArray {
 impl Drop for NumpyArray {
     fn drop(&mut self) {
         if self.depth == 0 {
-            ffi!(Py_DECREF(self.array.cast::<PyObject>()));
             ffi!(Py_DECREF(self.capsule.cast::<PyObject>()));
         }
     }
@@ -950,8 +948,7 @@ impl Serialize for NumpyScalar {
 
 #[repr(C)]
 pub(crate) struct NumpyInt8 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: i8,
 }
 
@@ -967,8 +964,7 @@ impl Serialize for NumpyInt8 {
 
 #[repr(C)]
 pub(crate) struct NumpyInt16 {
-    pub ob_refcnt: Py_ssize_t,
-    pub ob_type: *mut PyTypeObject,
+    pub ob_base: PyObject,
     pub value: i16,
 }
 
@@ -984,8 +980,7 @@ impl Serialize for NumpyInt16 {
 
 #[repr(C)]
 pub(crate) struct NumpyInt32 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: i32,
 }
 
@@ -1001,8 +996,7 @@ impl Serialize for NumpyInt32 {
 
 #[repr(C)]
 pub(crate) struct NumpyInt64 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: i64,
 }
 
@@ -1018,8 +1012,7 @@ impl Serialize for NumpyInt64 {
 
 #[repr(C)]
 pub(crate) struct NumpyUint8 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: u8,
 }
 
@@ -1035,8 +1028,7 @@ impl Serialize for NumpyUint8 {
 
 #[repr(C)]
 pub(crate) struct NumpyUint16 {
-    pub ob_refcnt: Py_ssize_t,
-    pub ob_type: *mut PyTypeObject,
+    pub ob_base: PyObject,
     pub value: u16,
 }
 
@@ -1052,8 +1044,7 @@ impl Serialize for NumpyUint16 {
 
 #[repr(C)]
 pub(crate) struct NumpyUint32 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: u32,
 }
 
@@ -1069,8 +1060,7 @@ impl Serialize for NumpyUint32 {
 
 #[repr(C)]
 pub(crate) struct NumpyUint64 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: u64,
 }
 
@@ -1086,8 +1076,7 @@ impl Serialize for NumpyUint64 {
 
 #[repr(C)]
 pub(crate) struct NumpyFloat16 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: u16,
 }
 
@@ -1104,8 +1093,7 @@ impl Serialize for NumpyFloat16 {
 
 #[repr(C)]
 pub(crate) struct NumpyFloat32 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: f32,
 }
 
@@ -1121,8 +1109,7 @@ impl Serialize for NumpyFloat32 {
 
 #[repr(C)]
 pub(crate) struct NumpyFloat64 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: f64,
 }
 
@@ -1138,8 +1125,7 @@ impl Serialize for NumpyFloat64 {
 
 #[repr(C)]
 pub(crate) struct NumpyBool {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: bool,
 }
 
@@ -1369,8 +1355,7 @@ impl Serialize for NumpyDatetime64Array<'_> {
 
 #[repr(C)]
 pub(crate) struct NumpyDatetime64 {
-    ob_refcnt: Py_ssize_t,
-    ob_type: *mut PyTypeObject,
+    ob_base: PyObject,
     value: i64,
 }
 

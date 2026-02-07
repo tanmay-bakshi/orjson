@@ -100,9 +100,21 @@ impl Serialize for PyObjectSerializer {
                 )
                 .serialize(serializer),
                 ObType::List => {
-                    if ffi!(Py_SIZE(self.ptr)) == 0 {
-                        ZeroListSerializer::new().serialize(serializer)
-                    } else {
+                    #[cfg(not(Py_GIL_DISABLED))]
+                    {
+                        if ffi!(Py_SIZE(self.ptr)) == 0 {
+                            ZeroListSerializer::new().serialize(serializer)
+                        } else {
+                            ListTupleSerializer::from_list(
+                                PyListRef::from_ptr_unchecked(self.ptr),
+                                self.state,
+                                self.default,
+                            )
+                            .serialize(serializer)
+                        }
+                    }
+                    #[cfg(Py_GIL_DISABLED)]
+                    {
                         ListTupleSerializer::from_list(
                             PyListRef::from_ptr_unchecked(self.ptr),
                             self.state,

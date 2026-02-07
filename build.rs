@@ -4,10 +4,6 @@
 fn main() {
     let python_config = pyo3_build_config::get();
 
-    if python_config.is_free_threaded() && std::env::var("ORJSON_BUILD_FREETHREADED").is_err() {
-        not_supported("free-threaded Python")
-    }
-
     #[allow(unused_variables)]
     let is_64_bit_python = matches!(python_config.pointer_width, Some(64));
 
@@ -34,7 +30,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=CFLAGS");
     println!("cargo:rerun-if-env-changed=LDFLAGS");
-    println!("cargo:rerun-if-env-changed=ORJSON_BUILD_FREETHREADED");
     println!("cargo:rerun-if-env-changed=RUSTFLAGS");
     println!("cargo:rustc-check-cfg=cfg(cold_path)");
     println!("cargo:rustc-check-cfg=cfg(CPython)");

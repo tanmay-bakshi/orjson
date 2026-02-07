@@ -73,23 +73,151 @@ impl Serialize for DictGenericSerializer {
             err!(SerializeError::RecursionLimit)
         }
 
-        if self.dict.len() == 0 {
-            cold_path!();
-            ZeroDictSerializer::new().serialize(serializer)
-        } else if opt_disabled!(self.state.opts(), SORT_OR_NON_STR_KEYS) {
-            unsafe {
-                (*(core::ptr::from_ref::<DictGenericSerializer>(self)).cast::<Dict>())
-                    .serialize(serializer)
+        #[cfg(Py_GIL_DISABLED)]
+        {
+            #[cfg(Py_GIL_DISABLED)]
+            struct DictItemsSnapshot {
+                items: Vec<(
+                    NonNull<crate::ffi::PyObject>,
+                    NonNull<crate::ffi::PyObject>,
+                )>,
             }
-        } else if opt_enabled!(self.state.opts(), NON_STR_KEYS) {
-            unsafe {
-                (*(core::ptr::from_ref::<DictGenericSerializer>(self)).cast::<DictNonStrKey>())
-                    .serialize(serializer)
+
+            #[cfg(Py_GIL_DISABLED)]
+            impl DictItemsSnapshot {
+                #[inline]
+                fn new(dict: PyDictRef) -> Self {
+                    unsafe {
+                        Self {
+                            items: crate::util::snapshot_pydict_items(dict.as_ptr()),
+                        }
+                    }
+                }
             }
-        } else {
-            unsafe {
-                (*(core::ptr::from_ref::<DictGenericSerializer>(self)).cast::<DictSortedKey>())
-                    .serialize(serializer)
+
+            #[cfg(Py_GIL_DISABLED)]
+            impl Drop for DictItemsSnapshot {
+                fn drop(&mut self) {
+                    for (key, value) in self.items.iter() {
+                        unsafe {
+                            ffi!(Py_DECREF(key.as_ptr()));
+                            ffi!(Py_DECREF(value.as_ptr()));
+                        }
+                    }
+                }
+            }
+
+            let snapshot = DictItemsSnapshot::new(self.dict.clone());
+            if snapshot.items.len() == 0 {
+                cold_path!();
+                return ZeroDictSerializer::new().serialize(serializer);
+            }
+
+            if opt_disabled!(self.state.opts(), SORT_OR_NON_STR_KEYS) {
+                let mut map = serializer.serialize_map(None).unwrap();
+                for (key, value) in snapshot.items.iter() {
+                    let uni = PyStrRef::from_ptr(key.as_ptr())
+                        .map_err(|_| serde::ser::Error::custom(SerializeError::KeyMustBeStr))?
+                        .as_str();
+                    if uni.is_none() {
+                        cold_path!();
+                        err!(SerializeError::InvalidStr);
+                    }
+                    let pyvalue =
+                        PyObjectSerializer::new(value.as_ptr(), self.state, self.default);
+                    map.serialize_key(uni.unwrap()).unwrap();
+                    map.serialize_value(&pyvalue)?;
+                }
+                return map.end();
+            }
+
+            if opt_enabled!(self.state.opts(), NON_STR_KEYS) {
+                let opts = self.state.opts() & NOT_PASSTHROUGH;
+                let len = snapshot.items.len();
+                let mut items: SmallVec<[(String, *mut crate::ffi::PyObject); 8]> =
+                    SmallVec::with_capacity(len);
+
+                for (key, value) in snapshot.items.iter() {
+                    match PyStrRef::from_ptr(key.as_ptr()) {
+                        Ok(pystr) => match pystr.as_str() {
+                            Some(uni) => {
+                                items.push((String::from(uni), value.as_ptr()));
+                            }
+                            None => err!(SerializeError::InvalidStr),
+                        },
+                        Err(_) => match DictNonStrKey::pyobject_to_string(key.as_ptr(), opts) {
+                            Ok(key_as_str) => items.push((key_as_str, value.as_ptr())),
+                            Err(err) => err!(err),
+                        },
+                    }
+                }
+
+                let mut items_as_str: SmallVec<[(&str, *mut crate::ffi::PyObject); 8]> =
+                    SmallVec::with_capacity(len);
+                items
+                    .iter()
+                    .for_each(|(key, val)| items_as_str.push(((*key).as_str(), *val)));
+
+                if opt_enabled!(opts, SORT_KEYS) {
+                    sort_dict_items(&mut items_as_str);
+                }
+
+                let mut map = serializer.serialize_map(None).unwrap();
+                for (key, val) in items_as_str.iter() {
+                    let pyvalue = PyObjectSerializer::new(*val, self.state, self.default);
+                    map.serialize_key(key).unwrap();
+                    map.serialize_value(&pyvalue)?;
+                }
+                return map.end();
+            }
+
+            let len = snapshot.items.len();
+            let mut items: SmallVec<[(&str, *mut crate::ffi::PyObject); 8]> =
+                SmallVec::with_capacity(len);
+
+            for (key, value) in snapshot.items.iter() {
+                if unsafe { !core::ptr::eq(ob_type!(key.as_ptr()), STR_TYPE) } {
+                    err!(SerializeError::KeyMustBeStr)
+                }
+                let pystr = unsafe { PyStrRef::from_ptr_unchecked(key.as_ptr()) };
+                let uni = pystr.as_str();
+                if uni.is_none() {
+                    err!(SerializeError::InvalidStr)
+                }
+                items.push((uni.unwrap(), value.as_ptr()));
+            }
+
+            sort_dict_items(&mut items);
+
+            let mut map = serializer.serialize_map(None).unwrap();
+            for (key, val) in items.iter() {
+                let pyvalue = PyObjectSerializer::new(*val, self.state, self.default);
+                map.serialize_key(key).unwrap();
+                map.serialize_value(&pyvalue)?;
+            }
+            return map.end();
+        }
+
+        #[cfg(not(Py_GIL_DISABLED))]
+        {
+            if self.dict.len() == 0 {
+                cold_path!();
+                ZeroDictSerializer::new().serialize(serializer)
+            } else if opt_disabled!(self.state.opts(), SORT_OR_NON_STR_KEYS) {
+                unsafe {
+                    (*(core::ptr::from_ref::<DictGenericSerializer>(self)).cast::<Dict>())
+                        .serialize(serializer)
+                }
+            } else if opt_enabled!(self.state.opts(), NON_STR_KEYS) {
+                unsafe {
+                    (*(core::ptr::from_ref::<DictGenericSerializer>(self)).cast::<DictNonStrKey>())
+                        .serialize(serializer)
+                }
+            } else {
+                unsafe {
+                    (*(core::ptr::from_ref::<DictGenericSerializer>(self)).cast::<DictSortedKey>())
+                        .serialize(serializer)
+                }
             }
         }
     }
@@ -161,16 +289,27 @@ macro_rules! impl_serialize_entry {
                 $map.serialize_value(&pyvalue)?;
             }
             ObType::List => {
-                if ffi!(Py_SIZE($value)) == 0 {
-                    $map.serialize_key($key).unwrap();
-                    $map.serialize_value(&ZeroListSerializer::new()).unwrap();
-                } else {
+                $map.serialize_key($key).unwrap();
+                #[cfg(not(Py_GIL_DISABLED))]
+                {
+                    if ffi!(Py_SIZE($value)) == 0 {
+                        $map.serialize_value(&ZeroListSerializer::new()).unwrap();
+                    } else {
+                        let pyvalue = ListTupleSerializer::from_list(
+                            unsafe { PyListRef::from_ptr_unchecked($value) },
+                            $self.state,
+                            $self.default,
+                        );
+                        $map.serialize_value(&pyvalue)?;
+                    }
+                }
+                #[cfg(Py_GIL_DISABLED)]
+                {
                     let pyvalue = ListTupleSerializer::from_list(
                         unsafe { PyListRef::from_ptr_unchecked($value) },
                         $self.state,
                         $self.default,
                     );
-                    $map.serialize_key($key).unwrap();
                     $map.serialize_value(&pyvalue)?;
                 }
             }

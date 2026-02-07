@@ -59,6 +59,7 @@ pub(crate) use pyo3_ffi::{
     Py_True, Py_XDECREF, Py_buffer, Py_hash_t, Py_intptr_t, Py_mod_exec, Py_ssize_t, PyASCIIObject,
     PyBool_Type, PyBuffer_IsContiguous, PyByteArray_AsString, PyByteArray_Size, PyByteArray_Type,
     PyBytes_FromStringAndSize, PyBytes_Type, PyCFunction_NewEx, PyCapsule_Import,
+    PyCriticalSection, PyCriticalSection_Begin, PyCriticalSection_End,
     PyCompactUnicodeObject, PyDateTime_CAPI, PyDateTime_DATE_GET_HOUR,
     PyDateTime_DATE_GET_MICROSECOND, PyDateTime_DATE_GET_MINUTE, PyDateTime_DATE_GET_SECOND,
     PyDateTime_DATE_GET_TZINFO, PyDateTime_DELTA_GET_DAYS, PyDateTime_DELTA_GET_SECONDS,
@@ -113,4 +114,4 @@ pub(crate) use pyo3_ffi::PyModule_Add;
 
 #[cfg(Py_3_13)]
 #[allow(unused_imports)]
-pub(crate) use pyo3_ffi::{Py_MOD_GIL_USED, Py_mod_gil};
+pub(crate) use pyo3_ffi::{Py_MOD_GIL_NOT_USED, Py_MOD_GIL_USED, Py_mod_gil};

@@ -293,3 +293,39 @@ pub(crate) fn isize_to_usize(val: isize) -> usize {
     debug_assert!(val >= 0);
     val.cast_unsigned()
 }
+
+#[cfg(Py_GIL_DISABLED)]
+pub(crate) unsafe fn snapshot_pydict_items(
+    dict: *mut crate::ffi::PyObject,
+) -> Vec<(
+    core::ptr::NonNull<crate::ffi::PyObject>,
+    core::ptr::NonNull<crate::ffi::PyObject>,
+)> {
+    unsafe {
+        let mut cs = core::mem::MaybeUninit::<crate::ffi::PyCriticalSection>::uninit();
+        crate::ffi::PyCriticalSection_Begin(cs.as_mut_ptr(), dict);
+
+        let mut pos: crate::ffi::Py_ssize_t = 0;
+        let mut key: *mut crate::ffi::PyObject = core::ptr::null_mut();
+        let mut value: *mut crate::ffi::PyObject = core::ptr::null_mut();
+
+        // When `dict` is a `PyDictObject`, `Py_SIZE(dict)` reads `ma_used`.
+        // Under a critical section, this is safe and gives us a capacity hint.
+        let cap = isize_to_usize(crate::ffi::Py_SIZE(dict));
+        let mut items: Vec<(
+            core::ptr::NonNull<crate::ffi::PyObject>,
+            core::ptr::NonNull<crate::ffi::PyObject>,
+        )> = Vec::with_capacity(cap);
+
+        while crate::ffi::PyDict_Next(dict, &raw mut pos, &raw mut key, &raw mut value) != 0 {
+            debug_assert!(!key.is_null());
+            debug_assert!(!value.is_null());
+            ffi!(Py_INCREF(key));
+            ffi!(Py_INCREF(value));
+            items.push((nonnull!(key), nonnull!(value)));
+        }
+
+        crate::ffi::PyCriticalSection_End(cs.as_mut_ptr());
+        items
+    }
+}

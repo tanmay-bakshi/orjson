@@ -93,15 +93,30 @@ impl PyDictRef {
             );
         }
         #[cfg(Py_3_13)]
-        unsafe {
-            let _ = crate::ffi::_PyDict_SetItem_KnownHash_LockHeld(
-                self.as_ptr().cast::<crate::ffi::PyDictObject>(),
-                key.as_ptr(),
-                value,
-                key.hash(),
-            );
+        {
+            #[cfg(Py_GIL_DISABLED)]
+            unsafe {
+                let mut cs = core::mem::MaybeUninit::<crate::ffi::PyCriticalSection>::uninit();
+                crate::ffi::PyCriticalSection_Begin(cs.as_mut_ptr(), self.as_ptr());
+                let _ = crate::ffi::_PyDict_SetItem_KnownHash_LockHeld(
+                    self.as_ptr().cast::<crate::ffi::PyDictObject>(),
+                    key.as_ptr(),
+                    value,
+                    key.hash(),
+                );
+                crate::ffi::PyCriticalSection_End(cs.as_mut_ptr());
+            }
+
+            #[cfg(not(Py_GIL_DISABLED))]
+            unsafe {
+                let _ = crate::ffi::_PyDict_SetItem_KnownHash_LockHeld(
+                    self.as_ptr().cast::<crate::ffi::PyDictObject>(),
+                    key.as_ptr(),
+                    value,
+                    key.hash(),
+                );
+            }
         }
-        #[cfg(not(Py_GIL_DISABLED))]
         reverse_pydict_incref!(key.as_ptr());
         reverse_pydict_incref!(value);
     }
@@ -112,7 +127,6 @@ impl PyDictRef {
         unsafe {
             let _ = crate::ffi::PyDict_SetItem(self.as_ptr(), key.as_ptr(), value);
         }
-        #[cfg(not(Py_GIL_DISABLED))]
         reverse_pydict_incref!(key.as_ptr());
         reverse_pydict_incref!(value);
     }
